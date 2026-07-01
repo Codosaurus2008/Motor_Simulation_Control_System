@@ -14,6 +14,7 @@ Due to the use of pygame, this project runs only on python versions strictly old
 
 
 To rescale for window fit, adjust SCALE. Set SCALE=1 for monitors, SCALE=0.5 for laptop. 
+To be run from main.py
 
 
 Please comment possible improvements (besides translating it into cpp XD )
