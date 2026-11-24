@@ -1,20 +1,53 @@
-# Motor_Simulation_Control_System
+# AC-Antrieb: Frequenzumrichter + Asynchronmotor mit PID-Regelung
 
+Simulation eines Frequenzumrichter-Antriebs (Praktikum ABB).
 
+Starten: `python main.py` (benötigt `pygame` und `numpy`).
 
-This is a simulation of a controlled system operating on a motor. The inputs of the system are grid voltage and motor-specific values.  The system uses two PID controllers and an open-loop V/f controller to adjust power fed to the motor. 
-The voltage and required frequencies based on feedback from the controllers are changed by an AC drive, which is assumed to be able to communicate with the controllers. 
+## Bedienung
 
-The values are tracked and visualized. All implementation, including graphs, is made in pygame since matplotlib is really slow when combined with pygame. 
+| Eingabe | Wirkung |
+|---|---|
+| Start / Stop / Leertaste | Simulation laufen lassen / anhalten |
+| Reset / R | alles auf Anfang |
+| Einst. / S | Einstellungen (Zeitfenster, Rampe, J, U/f, PWM-Frequenz, Sim-Tempo) |
+| B (halten) | mechanische Bremse |
+| Slider | Last, Drehzahl-Sollwert, Messrauschen, Kp / Ki / Kd |
+| Esc | Beenden |
 
-In settings, one can adjust most of the constants relevant for analysis, though one can also directly change them in main.py if they should be constant over the simulation. For optimal performance, one might have to adjust the fps of the simulation.
+Für grosse Bildschirme in `main.py` `SCALE = 1.0` setzen. Bei laufendem
+Motor stroboskopiert die Rotoranimation. Dann in den Einstellungen das
+Sim-Tempo auf z. B. 0.05 stellen (Zeitlupe).
 
-Due to the use of pygame, this project runs only on python versions strictly older than 3.14. 
+## Dateien
 
+| Datei | Inhalt |
+|---|---|
+| `main.py` | Fenster, Bedienung, Zeichnen |
+| `simulation.py` | Gesamtsystem und Regelung (läuft ohne pygame) |
+| `ac_drive.py` | Netz, Diodengleichrichter, Vorladung, Zwischenkreis, PWM-Wechselrichter, Brems-Chopper |
+| `motor.py` | Asynchronmaschine (dynamisches Modell im alpha/beta-System) |
+| `rotor.py` | Mechanik der Welle + Darstellung des Rotors |
+| `brake.py` | Reibungsbremse mit Haftmodell |
+| `pid.py` | PID-Regler (Anti-Windup, gefilterter D-Anteil auf Messwert) |
+| `pygmonitor.py` | Grafen und Scope |
+| `slider.py`, `coil.py`, `fonts.py` | Bedienelemente / Darstellung |
 
+## Physik
 
-To rescale for window fit, adjust SCALE. Set SCALE=1 for monitors, SCALE=0.5 for laptop. 
-To be run from main.py
+**Umrichter:** 400-V-Netz → B6-Diodengleichrichter → Zwischenkreis
+(C = 1 mF, ca. 563 V) → 2-Level-Wechselrichter mit Sinus-Dreieck-PWM
+(2 kHz) und Nullsystem-Einspeisung (wie Raumzeigermodulation). Beim
+Einschalten lädt ein Vorladewiderstand den Kondensator. Speist der Motor
+beim Bremsen zurück, schaltet über 750 V ein Bremswiderstand zu.
 
+**Motor:** 4-kW-Asynchronmotor, 4-polig (p = 2). Zustände: Ständerstrom
+und Rotorfluss. Kontrolle am starren 50-Hz-Netz: 1436 U/min bei
+Nennmoment 26.7 Nm, 7.6 A, 4.4 kW, wie bei einem echten 4-kW-Motor.
 
-Please comment possible improvements (besides translating it into cpp XD )
+**Regelung (alle 0.5 ms), Kaskade:**
+Sollwert → Rampe → Drehzahl-PID → Momentsollwert (max. 40 Nm)
+→ Moment-PI mit Vorsteuerung → Schlupffrequenz (max. 30 rad/s)
+→ Statorfrequenz = p·ω + ω_Schlupf → U/f-Kennlinie (6.5 V/Hz + Anhebung) → PWM.
+
+**Zeitschritt:** 20 µs für Elektrik und Mechanik.
