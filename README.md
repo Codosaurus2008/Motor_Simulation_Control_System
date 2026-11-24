@@ -1,53 +1,53 @@
-# AC-Antrieb: Frequenzumrichter + Asynchronmotor mit PID-Regelung
+# AC Drive: Frequency Converter + Induction Motor with PID Control
 
-Simulation eines Frequenzumrichter-Antriebs (Praktikum ABB).
+Simulation of a frequency converter drive (ABB internship).
 
-Starten: `python main.py` (benötigt `pygame` und `numpy`).
+Run: `python main.py` (requires `pygame` and `numpy`).
 
-## Bedienung
+## Controls
 
-| Eingabe | Wirkung |
+| Input | Effect |
 |---|---|
-| Start / Stop / Leertaste | Simulation laufen lassen / anhalten |
-| Reset / R | alles auf Anfang |
-| Einst. / S | Einstellungen (Zeitfenster, Rampe, J, U/f, PWM-Frequenz, Sim-Tempo) |
-| B (halten) | mechanische Bremse |
-| Slider | Last, Drehzahl-Sollwert, Messrauschen, Kp / Ki / Kd |
-| Esc | Beenden |
+| Start / Stop / Space | Run / pause the simulation |
+| Reset / R | Reset everything |
+| Settings / S | Settings (time windows, ramp, J, V/f, PWM frequency, sim speed) |
+| B (hold) | Mechanical brake |
+| Sliders | Load, speed setpoint, measurement noise, Kp / Ki / Kd |
+| Esc | Quit |
 
-Für grosse Bildschirme in `main.py` `SCALE = 1.0` setzen. Bei laufendem
-Motor stroboskopiert die Rotoranimation. Dann in den Einstellungen das
-Sim-Tempo auf z. B. 0.05 stellen (Zeitlupe).
+For large screens, set `SCALE = 1.0` in `main.py`. While the motor is
+running, the rotor animation strobes. In that case, set the sim speed in
+the settings to e.g. 0.05 (slow motion).
 
-## Dateien
+## Files
 
-| Datei | Inhalt |
+| File | Contents |
 |---|---|
-| `main.py` | Fenster, Bedienung, Zeichnen |
-| `simulation.py` | Gesamtsystem und Regelung (läuft ohne pygame) |
-| `ac_drive.py` | Netz, Diodengleichrichter, Vorladung, Zwischenkreis, PWM-Wechselrichter, Brems-Chopper |
-| `motor.py` | Asynchronmaschine (dynamisches Modell im alpha/beta-System) |
-| `rotor.py` | Mechanik der Welle + Darstellung des Rotors |
-| `brake.py` | Reibungsbremse mit Haftmodell |
-| `pid.py` | PID-Regler (Anti-Windup, gefilterter D-Anteil auf Messwert) |
-| `pygmonitor.py` | Grafen und Scope |
-| `slider.py`, `coil.py`, `fonts.py` | Bedienelemente / Darstellung |
+| `main.py` | Window, controls, drawing |
+| `simulation.py` | Complete system and control (runs without pygame) |
+| `ac_drive.py` | Grid, diode rectifier, precharge, DC link, PWM inverter, brake chopper |
+| `motor.py` | Induction machine (dynamic model in the alpha/beta frame) |
+| `rotor.py` | Shaft mechanics + rotor drawing |
+| `brake.py` | Friction brake with stiction model |
+| `pid.py` | PID controller (anti-windup, filtered D term on the measurement) |
+| `pygmonitor.py` | Graphs and scope |
+| `slider.py`, `coil.py`, `fonts.py` | Controls / drawing |
 
-## Physik
+## Physics
 
-**Umrichter:** 400-V-Netz → B6-Diodengleichrichter → Zwischenkreis
-(C = 1 mF, ca. 563 V) → 2-Level-Wechselrichter mit Sinus-Dreieck-PWM
-(2 kHz) und Nullsystem-Einspeisung (wie Raumzeigermodulation). Beim
-Einschalten lädt ein Vorladewiderstand den Kondensator. Speist der Motor
-beim Bremsen zurück, schaltet über 750 V ein Bremswiderstand zu.
+**Converter:** 400 V grid → B6 diode rectifier → DC link
+(C = 1 mF, approx. 563 V) → 2-level inverter with sine-triangle PWM
+(2 kHz) and zero-sequence injection (like space vector modulation). At
+switch-on, a precharge resistor charges the capacitor. If the motor feeds
+energy back while braking, a brake resistor is switched in above 750 V.
 
-**Motor:** 4-kW-Asynchronmotor, 4-polig (p = 2). Zustände: Ständerstrom
-und Rotorfluss. Kontrolle am starren 50-Hz-Netz: 1436 U/min bei
-Nennmoment 26.7 Nm, 7.6 A, 4.4 kW, wie bei einem echten 4-kW-Motor.
+**Motor:** 4 kW induction motor, 4-pole (p = 2). States: stator current
+and rotor flux. Check on a stiff 50 Hz grid: 1436 rpm at rated torque
+26.7 Nm, 7.6 A, 4.4 kW, as with a real 4 kW motor.
 
-**Regelung (alle 0.5 ms), Kaskade:**
-Sollwert → Rampe → Drehzahl-PID → Momentsollwert (max. 40 Nm)
-→ Moment-PI mit Vorsteuerung → Schlupffrequenz (max. 30 rad/s)
-→ Statorfrequenz = p·ω + ω_Schlupf → U/f-Kennlinie (6.5 V/Hz + Anhebung) → PWM.
+**Control (every 0.5 ms), cascade:**
+Setpoint → ramp → speed PID → torque setpoint (max. 40 Nm)
+→ torque PI with feedforward → slip frequency (max. 30 rad/s)
+→ stator frequency = p·ω + ω_slip → V/f characteristic (6.5 V/Hz + boost) → PWM.
 
-**Zeitschritt:** 20 µs für Elektrik und Mechanik.
+**Time step:** 20 µs for electrics and mechanics.
