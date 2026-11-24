@@ -1,91 +1,179 @@
-import numpy as np
+import math
+
+TWO_PI = 2.0 * math.pi
+SQRT3 = math.sqrt(3.0)
+
+
 class ACDrive:
-    def __init__(self):
-        #-----grid input ----------
-        self.grid_freq= 50
-        self.grid_amp= 325 #230rms
+    """Frequenzumrichter (Spannungszwischenkreis-Umrichter).
 
+    Signalfluss:
+        3~ Netz -> B6-Diodengleichrichter -> DC-Zwischenkreis (Kondensator C)
+        -> 2-Level-PWM-Wechselrichter -> Motor
 
-        #------physical consts-----
-        self.Vdc=0
-        self.C=0.02 
-        self.R_rect=10 
-        #-----inverter------------
+    Modelliert werden:
+    - Netz: 3 Sinusspannungen (Strangspannung, Spitzenwert grid_amp)
+    - Gleichrichter: ideale Dioden. Ausgangsspannung = max - min der
+      Strangspannungen (= Huellkurve der Aussenleiterspannungen). Der
+      Ladestrom fliesst nur, wenn diese ueber U_DC liegt.
+    - Vorladung: beim Einschalten laedt ein Vorladewiderstand den
+      Kondensator langsam auf (sonst riesiger Einschaltstrom). Erst danach
+      ist der Umrichter "bereit".
+    - Wechselrichter: Sinus-Dreieck-PWM mit Nullsystem-Einspeisung
+      (entspricht der Raumzeigermodulation, max. Strangspannung U_DC/sqrt(3)).
+    - Brems-Chopper: wenn der Motor generatorisch Energie zurueckspeist,
+      steigt U_DC. Ueber 750 V wird ein Bremswiderstand zugeschaltet.
+    """
 
-        self.phase=0
-        self.pwm_freq= 1000
+    def __init__(self, grid_amp=325.0, grid_freq=50.0, C=1.0e-3,
+                 R_line=0.5, R_precharge=47.0, pwm_freq=2000.0,
+                 V_chop_on=750.0, V_chop_off=720.0, R_chop=40.0):
+        # Netz (230 V eff Strangspannung -> 325 V Spitze, 400 V verkettet)
+        self.grid_amp = grid_amp
+        self.grid_freq = grid_freq
 
-    def grid_voltages(self,t):
-        w = 2 * np.pi * self.grid_freq
+        # Zwischenkreis
+        self.C = C
+        self.R_line = R_line            # Netz- und Diodenwiderstand
+        self.R_precharge = R_precharge  # Vorladewiderstand
 
+        # Wechselrichter
+        self.pwm_freq = pwm_freq
 
-        vA = self.grid_amp * np.sin(w * t)
-        vB = self.grid_amp * np.sin(w * t - 2 * np.pi / 3)
-        vC = self.grid_amp * np.sin(w * t - 4 * np.pi / 3)
+        # Brems-Chopper
+        self.V_chop_on = V_chop_on
+        self.V_chop_off = V_chop_off
+        self.R_chop = R_chop
 
+        self.reset()
+
+    def reset(self):
+        self.Vdc = 0.0
+        self.precharged = False
+        self.chopper_on = False
+        self.phase = 0.0
+        self.modulation = 0.0
+
+        self.vA_grid = self.vB_grid = self.vC_grid = 0.0
+        self.iA_grid = 0.0
+        self.Vrect = 0.0
+        self.I_rect = 0.0
+        self.I_inv = 0.0
+        self.I_chop = 0.0
+        self.sA = self.sB = self.sC = 0
+        self.vA = self.vB = self.vC = 0.0
+
+    @property
+    def ready(self):
+        return self.precharged
+
+    # ------------------------------------------------------------
+    # Netz und Gleichrichter
+    # ------------------------------------------------------------
+    def grid_voltages(self, t):
+        wt = TWO_PI * self.grid_freq * t
+        vA = self.grid_amp * math.sin(wt)
+        vB = self.grid_amp * math.sin(wt - TWO_PI / 3.0)
+        vC = self.grid_amp * math.sin(wt + TWO_PI / 3.0)
         return vA, vB, vC
 
-    #-------rectifier ------------
-    def rectifier_voltage(self, vA, vB, vC):
+    @staticmethod
+    def rectifier_voltage(vA, vB, vC):
         return max(vA, vB, vC) - min(vA, vB, vC)
-    
-    def rectifier_current(self, Vrect):
-        if Vrect > self.Vdc:
-            return (Vrect - self.Vdc) / self.R_rect
+
+    # ------------------------------------------------------------
+    # PWM
+    # ------------------------------------------------------------
+    def carrier(self, t):
+        """Symmetrisches Dreieck zwischen -1 und +1 mit pwm_freq."""
+        x = (t * self.pwm_freq) % 1.0
+        return 4.0 * abs(x - 0.5) - 1.0
+
+    # ------------------------------------------------------------
+    # Ein Simulationsschritt
+    # ------------------------------------------------------------
+    def update(self, t, dt, freq, V_amp, iA, iB, iC, enable=True):
+        """freq  : Ausgangsfrequenz in Hz (Vorzeichen = Drehrichtung)
+        V_amp : gewuenschte Strangspannung (Spitzenwert) in V
+        iA..iC: Motorstroeme (aus dem letzten Schritt)
+        Gibt die Strangspannungen am Motor (gegen Sternpunkt) zurueck."""
+
+        # --- Netz + Gleichrichter ---
+        vA_g, vB_g, vC_g = self.grid_voltages(t)
+        self.vA_grid, self.vB_grid, self.vC_grid = vA_g, vB_g, vC_g
+        Vrect = self.rectifier_voltage(vA_g, vB_g, vC_g)
+        self.Vrect = Vrect
+
+        R = self.R_line if self.precharged else self.R_precharge
+        I_rect = (Vrect - self.Vdc) / R if Vrect > self.Vdc else 0.0
+        self.I_rect = I_rect
+
+        # Netzstrom Phase A: die Phase mit der hoechsten Spannung fuehrt
+        # +I_rect, die mit der tiefsten -I_rect, die dritte keinen Strom.
+        if vA_g >= vB_g and vA_g >= vC_g:
+            self.iA_grid = I_rect
+        elif vA_g <= vB_g and vA_g <= vC_g:
+            self.iA_grid = -I_rect
         else:
-            return 0
-    def inverter_current(self, vA, vB, vC, iA, iB, iC):
-        P = vA +vB +vC + iA + iB + iC
-        if self.Vdc>1e-6:
-            return P/ self.Vdc
+            self.iA_grid = 0.0
+
+        if not self.precharged and self.Vdc > 0.9 * SQRT3 * self.grid_amp:
+            self.precharged = True
+
+        # --- Wechselrichter ---
+        self.phase = (self.phase + TWO_PI * freq * dt) % TWO_PI
+        Vdc = self.Vdc
+
+        if enable and self.precharged and Vdc > 1.0:
+            half = 0.5 * Vdc
+            m = V_amp / half
+            self.modulation = m
+            ph = self.phase
+            uA = m * math.sin(ph)
+            uB = m * math.sin(ph - TWO_PI / 3.0)
+            uC = m * math.sin(ph + TWO_PI / 3.0)
+            # Nullsystem-Einspeisung (wie Raumzeigermodulation)
+            u0 = -0.5 * (max(uA, uB, uC) + min(uA, uB, uC))
+            uA = min(1.0, max(-1.0, uA + u0))
+            uB = min(1.0, max(-1.0, uB + u0))
+            uC = min(1.0, max(-1.0, uC + u0))
+
+            c = self.carrier(t)
+            sA = 1 if uA > c else 0
+            sB = 1 if uB > c else 0
+            sC = 1 if uC > c else 0
         else:
-            return 0
-        
-    # PWM 
-    def pwm_phase(self, phase, modulation, t):
-        ref  = modulation * np.sin(phase)
-        carrier = np.sin(2 *  np.pi - self.pwm_freq * t)
+            # Pulssperre: alle unteren Schalter -> Nullspannungszeiger
+            self.modulation = 0.0
+            sA = sB = sC = 0
 
-        if ref > carrier:
-            return self.Vdc
-        else:
-            return -self.Vdc
-        
+        self.sA, self.sB, self.sC = sA, sB, sC
 
+        # Brueckenzweig-Spannungen gegen DC-Mitte, dann gegen Motorsternpunkt
+        vAo = (sA - 0.5) * Vdc
+        vBo = (sB - 0.5) * Vdc
+        vCo = (sC - 0.5) * Vdc
+        vN = (vAo + vBo + vCo) / 3.0
+        vA = vAo - vN
+        vB = vBo - vN
+        vC = vCo - vN
+        self.vA, self.vB, self.vC = vA, vB, vC
 
-    def update(self,t, dt, freq, modulation, iA, iB, iC):
-        """
-        freq ---- controller output frequency 
-        """
-        vA_grid, vB_grid, vC_grid = self.grid_voltages(t)
+        # DC-Strom in den Wechselrichter (exakt fuer die Schalterstellung)
+        I_inv = sA * iA + sB * iB + sC * iC
+        self.I_inv = I_inv
 
-        Vrect = self.rectifier_voltage(vA_grid, vB_grid, vC_grid)
+        # --- Brems-Chopper (Hysterese) ---
+        if self.Vdc > self.V_chop_on:
+            self.chopper_on = True
+        elif self.Vdc < self.V_chop_off:
+            self.chopper_on = False
+        I_chop = self.Vdc / self.R_chop if self.chopper_on else 0.0
+        self.I_chop = I_chop
 
-        I_rect = self.rectifier_current(Vrect)
+        # --- Zwischenkreis: C dU/dt = I_rect - I_inv - I_chop ---
+        self.Vdc += (I_rect - I_inv - I_chop) / self.C * dt
+        if self.Vdc < 0.0:
+            self.Vdc = 0.0
 
-        self.phase += 2 * np.pi * freq * dt 
-
-        phaseA = self.phase
-        phaseB = self.phase - 2 * np.pi / 3
-        phaseC = self.phase - 4 * np.pi / 3
-
-
-        vA = self.pwm_phase(phaseA, modulation, t)
-        vB = self.pwm_phase(phaseB, modulation, t)
-        vC = self.pwm_phase(phaseC, modulation, t)
-
-        I_inv = self.inverter_current(vA, vB, vC, iA, iB, iC)
-
-        dVdc = (I_rect - I_inv) / self.C 
-        self.Vdc += dVdc * dt 
-
-        return {
-            "vA": vA,
-            "vB": vB,
-            "vC": vC,
-            "Vdc": self.Vdc,
-            "Vrect": Vrect,
-            "vA_grid": vA_grid,
-            "vB_grid": vB_grid,
-            "vC_grid": vC_grid
-        }
+        return vA, vB, vC

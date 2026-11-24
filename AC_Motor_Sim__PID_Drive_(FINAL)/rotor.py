@@ -1,61 +1,57 @@
-import pygame
-import numpy as np
+import math
+
 
 class Rotor:
-    def __init__(self, center, radius, scale=1.0):
-        self.center = np.array(center, dtype=float)
-        self.radius = radius
-        self.scale = scale
+    """Mechanik der Motorwelle (Motor + angekoppelte Last).
 
-        self.theta = 0.0
-        self.omega = 0.0
+    J * d omega/dt = M_motor - M_last - B*omega - M_bremse
+    """
 
-        self.J = 10
-        self.torque = 0.0
+    def __init__(self, J=0.05, B=0.002):
+        self.J = J            # Traegheitsmoment [kg m^2]
+        self.B = B            # viskose Lagerreibung [Nm s/rad]
+        self.reset()
 
-    def update(self,dt):
-        self.omega += (self.torque / self.J) * dt
-        self.theta += self.omega * dt
-        self.theta = self.theta % (2 * np.pi)
+    def reset(self):
+        self.theta = 0.0      # mechanischer Winkel [rad]
+        self.omega = 0.0      # Winkelgeschwindigkeit [rad/s]
+        self.torque = 0.0     # resultierendes Moment [Nm]
+        self.brake_torque = 0.0
 
-    def draw(self, screen):
-        cx, cy = int(self.center[0]), int(self.center[1])
+    def update(self, motor_torque, load_torque, brake, dt):
+        drive = motor_torque - load_torque - self.B * self.omega
+        brake_torque = brake.compute(self.omega, drive, self.J, dt) if brake else 0.0
+        self.brake_torque = brake_torque
+        self.torque = drive - brake_torque
+        self.omega += self.torque / self.J * dt
+        self.theta = (self.theta + self.omega * dt) % (2.0 * math.pi)
 
-        # rotor core
-        pygame.draw.circle(screen, (120, 120, 120), (cx, cy), self.radius)
+    # ------------------------------------------------------------
+    # Darstellung
+    # ------------------------------------------------------------
+    def draw(self, screen, center, radius, flux_angle, flux_level, scale=1.0):
+        """Rotor mit Rotorfluss (N/S) im elektrischen Winkel und einer
+        Markierung fuer den mechanischen Wellenwinkel."""
+        import pygame
 
-        self.draw_axis(screen)
-        self.draw_poles(screen)
+        cx, cy = int(center[0]), int(center[1])
+        pygame.draw.circle(screen, (110, 110, 110), (cx, cy), radius)
 
-    def draw_axis(self, screen):
-        cx, cy = self.center
+        # Rotorfluss: Nordpol in Flussrichtung
+        r = radius * 0.72
+        level = max(0.15, min(1.0, flux_level))
+        c, s = math.cos(flux_angle), math.sin(flux_angle)
+        xN, yN = cx + r * c, cy - r * s
+        xS, yS = cx - r * c, cy + r * s
+        pygame.draw.line(screen, (230, 210, 60), (xS, yS), (xN, yN),
+                         max(2, int(4 * scale)))
+        pole_r = max(5, int(14 * scale))
+        pygame.draw.circle(screen, (int(255 * level), 40, 40), (int(xN), int(yN)), pole_r)
+        pygame.draw.circle(screen, (40, 40, int(255 * level)), (int(xS), int(yS)), pole_r)
 
-        length = self.radius*0.8
-        x = cx + length * np.cos(self.theta)
-        y = cy - length * np.sin(self.theta)   
-
-        pygame.draw.line(
-            screen,
-            (255,255,0),
-            (int(cx- length * np.cos(self.theta)), int(cy +length * np.sin(self.theta))),
-            (int(x), int(y)),
-            max(2, int(3 * self.scale))
-        )
-
-    def draw_poles(self, screen):
-        cx, cy = self.center
-        r = self.radius*0.8
-
-        # North
-        xN = cx + r * np.cos(self.theta)
-        yN = cy - r * np.sin(self.theta)
-
-        # South
-        xS = cx - r * np.cos(self.theta)
-        yS = cy + r * np.sin(self.theta)
-
-        pole_radius = max(6, int(13 * self.scale))
-        pygame.draw.circle(screen, (255,0,0), (int(xN), int(yN)), pole_radius)
-        pygame.draw.circle(screen, (0,0,255), (int(xS), int(yS)), pole_radius)
-
-
+        # Welle: mechanischer Winkel (weisser Punkt am Rotorrand)
+        rm = radius * 0.92
+        xm = cx + rm * math.cos(self.theta)
+        ym = cy - rm * math.sin(self.theta)
+        pygame.draw.circle(screen, (255, 255, 255), (int(xm), int(ym)), max(3, int(6 * scale)))
+        pygame.draw.circle(screen, (30, 30, 30), (cx, cy), max(3, int(8 * scale)))

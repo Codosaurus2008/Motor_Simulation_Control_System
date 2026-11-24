@@ -1,42 +1,40 @@
-import numpy as np
+import math
+
 
 class BrakeSystem:
-    def __init__(self, mode="viscous"):
-        """
-        mode:
-        - "viscous" → proportional to speed (realistic electrical braking)
-        - "hard" → strong constant braking (mechanical brake)
-        """
+    """Mechanische Bremse an der Motorwelle.
+
+    mode:
+    - "hard"    : Reibungsbremse (Coulomb-Reibung) mit maximalem Moment
+                  hard_torque. Mit Haftreibung: Steht die Welle, haelt die
+                  Bremse sie fest, solange das antreibende Moment kleiner
+                  als hard_torque ist. Die Bremse kann die Drehrichtung nie
+                  umkehren (kein Schwingen um null).
+    - "viscous" : geschwindigkeitsproportionale Bremse (Wirbelstrombremse),
+                  M = viscous_gain * omega.
+    """
+
+    def __init__(self, mode="hard", hard_torque=50.0, viscous_gain=1.0):
         self.active = False
         self.mode = mode
+        self.hard_torque = hard_torque
+        self.viscous_gain = viscous_gain
 
-        # tuning parameters
-        self.viscous_gain = 5
-        self.hard_torque = 20
+    def compute(self, omega, drive_torque, J, dt):
+        """Gibt das Bremsmoment zurueck (positiv = bremst positive Drehung).
 
-        # stop threshold
-        self.stop_threshold = 0.1
-
-    def compute(self, omega):
-        """
-        Returns braking torque based on current speed
+        omega        : aktuelle Winkelgeschwindigkeit [rad/s]
+        drive_torque : Summe aller anderen Momente auf die Welle [Nm]
+        J, dt        : Traegheit und Zeitschritt (fuer das Haftmodell)
         """
         if not self.active:
             return 0.0
 
         if self.mode == "viscous":
-            # Smooth braking (T ∝ ω)
             return self.viscous_gain * omega
 
-        elif self.mode == "hard":
-            # Strong constant braking
-            return self.hard_torque * np.sign(omega)
-
-        return 0.0
-
-    def enforce_stop(self, rotor):
-        """
-        Prevents oscillation around zero speed
-        """
-        if self.active and abs(rotor.omega) < self.stop_threshold:
-            rotor.omega = 0
+        # Moment, das die Welle in diesem Schritt genau zum Stillstand bringt
+        torque_to_stop = drive_torque + J * omega / dt
+        if abs(torque_to_stop) <= self.hard_torque:
+            return torque_to_stop          # Welle steht / bleibt stehen
+        return math.copysign(self.hard_torque, torque_to_stop)

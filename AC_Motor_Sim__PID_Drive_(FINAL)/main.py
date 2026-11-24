@@ -1,600 +1,412 @@
+"""AC-Antrieb: Frequenzumrichter + Asynchronmotor mit Kaskadenregelung.
+
+Bedienung
+---------
+Maus     : Slider ziehen, Buttons Start / Stop / Reset / Einstellungen
+Leertaste: Start / Stop
+R        : Reset
+B        : mechanische Bremse (gedrueckt halten)
+S        : Einstellungen ein/aus
+Esc      : Beenden
+
+Die Physik steckt in simulation.py (laeuft auch ohne pygame).
+"""
+
+import math
+import sys
+import time
+
 import pygame
-import random
-from rotor import Rotor
-import numpy as np
+
 from coil import Coil
-from pygmonitor import Monitor
-from pygmonitor import DriveMonitor
+from fonts import get_font
+from pygmonitor import Monitor, DriveMonitor
+from simulation import DriveSimulation
 from slider import Slider
-from pygmonitor import compute_rms
-from brake import BrakeSystem
-from pid import PID
-from ac_drive import ACDrive
-import time 
 
+# ------------------------------------------------------------------
+# Anzeige
+# ------------------------------------------------------------------
+SCALE = 0.5          # 0.5 fuer Laptop, 1.0 fuer grossen Bildschirm
+FPS = 30
 
-#--------------------- user and physical parameters ::::: -------------
-time_window_main= 10
-time_window_drive=0.5 
-omega_target=7
-V_amp = 20
-SCALE=0.5    #0.5 for laptop, 1 for screen
-
-k=0.3
-J = 0.2
-L= 0.1
-
-power_elec=0
-K_slip=0.1
-K_vf=50
-dt = 0.0005
-modulation=0.5
-#-------------------display-------------------------- 
-w= 2* np.pi * 1
-pygame.init()
-info = pygame.display.Info()
 BASE_WIDTH, BASE_HEIGHT = 2500, 1400
 
 
 def scaled(value):
     return int(value * SCALE)
 
+
 WIDTH, HEIGHT = scaled(BASE_WIDTH), scaled(BASE_HEIGHT)
 LEFT_WIDTH = scaled(2000)
 RIGHT_WIDTH = WIDTH - LEFT_WIDTH
 TOP_HEIGHT = scaled(1100)
-BOTTOM_HEIGHT = HEIGHT
 RHEIGHT = scaled(720)
-RHEIGHT = scaled(720)
+
 main_h = int(TOP_HEIGHT * 0.7)
-drive_h = int(TOP_HEIGHT * 0.3)
+drive_h = TOP_HEIGHT - main_h
 
 rect_main = pygame.Rect(0, 0, LEFT_WIDTH, main_h)
 rect_drive = pygame.Rect(0, main_h, LEFT_WIDTH, drive_h)
-
-graph_surface_main = pygame.Surface((LEFT_WIDTH, main_h))
-graph_surface_drive = pygame.Surface((LEFT_WIDTH, drive_h))
-
 rect_controls = pygame.Rect(0, TOP_HEIGHT, LEFT_WIDTH, HEIGHT - TOP_HEIGHT)
 rect_sim = pygame.Rect(LEFT_WIDTH, 0, RIGHT_WIDTH, RHEIGHT)
-rect_values = pygame.Rect(LEFT_WIDTH, RHEIGHT, RIGHT_WIDTH, BOTTOM_HEIGHT)
-control_surface = pygame.Surface((LEFT_WIDTH, HEIGHT - TOP_HEIGHT))
-sim_surface = pygame.Surface((RIGHT_WIDTH, HEIGHT))
-value_surface = pygame.Surface((RIGHT_WIDTH, BOTTOM_HEIGHT))
+rect_values = pygame.Rect(LEFT_WIDTH, RHEIGHT, RIGHT_WIDTH, HEIGHT - RHEIGHT)
 
-
-sim_center = (RIGHT_WIDTH // 2, RHEIGHT // 2)
-center = sim_center
-screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.RESIZABLE)
+pygame.init()
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption(
+    "AC Drive  |  Space: Start/Stop   R: Reset   B: Brake   S: Settings   Esc: Quit")
 clock = pygame.time.Clock()
-monitor = Monitor(scale=SCALE)
-monitor_drive = DriveMonitor(scale=SCALE)
-t = 0
-angles = [0, 2*np.pi/3, 4*np.pi/3 ]
-gap = 12
 
-# relative heights 
-heights = [2.0, 1.0, 1.0, 1.0]
+graph_surface_main = pygame.Surface(rect_main.size)
+graph_surface_drive = pygame.Surface(rect_drive.size)
+control_surface = pygame.Surface(rect_controls.size)
+sim_surface = pygame.Surface(rect_sim.size)
+value_surface = pygame.Surface(rect_values.size)
 
-total = sum(heights)
+# ------------------------------------------------------------------
+# Simulation und Monitore
+# ------------------------------------------------------------------
+sim = DriveSimulation()
+params = sim.params
 
-usable_height = HEIGHT - gap * (len(heights)+1)
-row_heights = [int(usable_height * h / total) for h in heights]
+monitor = Monitor(scale=SCALE, time_window=params["time_window_main"])
+monitor_drive = DriveMonitor(scale=SCALE, time_window=params["time_window_drive"])
+sim.monitor = monitor
+sim.drive_monitor = monitor_drive
 
-monitor.time_window= time_window_main
-monitor_drive.time_window = time_window_drive
+# ------------------------------------------------------------------
+# Motorbild: 2-poliges Ersatzbild (elektrische Winkel)
+# ------------------------------------------------------------------
+sim_center = (RIGHT_WIDTH // 2, scaled(330))
+rotor_radius = scaled(130)
+stator_radius = scaled(190)
+I_SCALE = 15.0   # Strom fuer volle Farbintensitaet [A]
 
+coils = []
+for phase, axis in (("A", 0.0), ("B", 2 * math.pi / 3), ("C", 4 * math.pi / 3)):
+    # Wicklungsachse 'axis': Hinleiter bei axis+90 Grad, Rueckleiter bei axis-90 Grad
+    for sign, angle in ((+1, axis + math.pi / 2), (-1, axis - math.pi / 2)):
+        x = sim_center[0] + stator_radius * math.cos(angle)
+        y = sim_center[1] - stator_radius * math.sin(angle)
+        coils.append(Coil((x, y), phase, sign=sign, scale=SCALE, i_scale=I_SCALE))
 
-freq=20
+# ------------------------------------------------------------------
+# Slider
+# ------------------------------------------------------------------
+col_x = [scaled(50), scaled(700), scaled(1350)]
+row_y = [scaled(100), scaled(180), scaled(260)]
+slider_w = scaled(500)
+inp = sim.inputs
 
-# ----------------------rotor -------------------
-rotor = Rotor(center, scaled(80), scale=SCALE)
-rotor.omega = 0
-rotor.J = J
-stator_radius = rotor.radius * 1.2
-rotor.torque = 20
-
-
-#--------------------------coils--------------------
-coils=[]
-for i, angle in enumerate(angles):
-    x = center[0] + stator_radius* np.cos(angle)
-    y = center[1] - stator_radius * np.sin(angle)
-
-    phase = ["A","B","C"][i]
-    coils.append(Coil((x,y), phase, scale=SCALE))
-
-
-
-
-
-
-#---------------------braking--------------------
-
-brake = BrakeSystem()
-rotor.center=sim_center
-pid_speed= PID(
-    Kp=5, 
-    Ki=4,
-    Kd=2, 
-    limit_min=-50, 
-    limit_max=50
-)
-
-pid_torque=PID(
-    Kp=0.5, 
-    Ki=1, 
-    Kd=0, 
-    limit_min=-50, 
-    limit_max=50
-)
-
-#------------------- functions-------------------------
-def abc_to_alpha_beta(iA, iB, iC):
-    alpha = (2/3) * (iA - 0.5*iB - 0.5*iC)
-    beta  = (2/3) * (np.sqrt(3)/2) * (iB - iC)
-    return alpha, beta
-def draw_values(surface, rotor, field_strength, V_rms=0, I_rms=0):
-    surface.fill((200, 200, 200))
-
-    font = pygame.font.SysFont(None, max(18, int(30 * SCALE)))
-
-    texts = [
-        f"Speed ω: {rotor.omega:.2f}",
-        f"Torque: {rotor.torque:.4f}",
-        f"Torque Max: {torque_max:.4f}",
-        f"Flux: {field_strength:.3f}",
-        f"Power: {power_elec:.2f}" ,
-        
-        
-    
-        #V_rms = np.sqrt((V_rms_A**2 + V_rms_B**2 + V_rms_C**2)/3)
-        #I_rms = np.sqrt((I_rms_A**2 + I_rms_B**2 + I_rms_C**2)/3) 
-        f"Frequency: {freq:.2f}",
-        f" V/f ratio: {vf_ratio:.3f}"
-    ]
-
-    for i, text in enumerate(texts):
-        rendered = font.render(text, True, (0,0,0))
-        surface.blit(rendered, (scaled(20), scaled(10) + i * scaled(50)))
+sliders = {
+    "load_base": Slider(col_x[0], row_y[0], slider_w, 0.0, 30.0, inp["load_base"],
+                        "Base load", SCALE, "Nm", 1),
+    "load_dist": Slider(col_x[0], row_y[1], slider_w, 0.0, 20.0, inp["load_dist"],
+                        "Load disturbance", SCALE, "Nm", 1),
+    "dist_freq": Slider(col_x[0], row_y[2], slider_w, 0.0, 2.0, inp["dist_freq"],
+                        "Disturbance freq.", SCALE, "Hz", 2),
+    "omega_target": Slider(col_x[1], row_y[0], slider_w, 0.0, 150.0, params["omega_target"],
+                           "Speed setpoint", SCALE, "rad/s", 1),
+    "noise": Slider(col_x[1], row_y[1], slider_w, 0.0, 5.0, inp["noise"],
+                    "Measurement noise", SCALE, "rad/s", 2),
+    "Kp": Slider(col_x[2], row_y[0], slider_w, 0.0, 5.0, inp["Kp"], "Kp", SCALE, "Nm s/rad", 2),
+    "Ki": Slider(col_x[2], row_y[1], slider_w, 0.0, 40.0, inp["Ki"], "Ki", SCALE, "Nm/rad", 1),
+    "Kd": Slider(col_x[2], row_y[2], slider_w, 0.0, 0.05, inp["Kd"], "Kd", SCALE, "Nm s2/rad", 3),
+}
+column_titles = ["Load", "Setpoint / Measurement", "Speed controller (PID)"]
 
 
-# simple button renderer
-def draw_button(surface, rect, text, active=True):
-    color = (100, 100, 100) if active else (100, 100, 100)
+def sync_sliders():
+    for key, s in sliders.items():
+        if key == "omega_target":
+            params["omega_target"] = s.value
+        else:
+            inp[key] = s.value
+    monitor.omega_target = params["omega_target"]
+
+
+# ------------------------------------------------------------------
+# Einstellungen
+# ------------------------------------------------------------------
+setting_fields = [
+    {"key": "time_window_main", "label": "Graph time window [s]", "min": 1.0, "max": 15.0, "step": 1.0},
+    {"key": "time_window_drive", "label": "Scope time window [s]", "min": 0.02, "max": 1.0, "step": 0.02},
+    {"key": "ramp", "label": "Acceleration ramp [rad/s2]", "min": 10.0, "max": 500.0, "step": 10.0},
+    {"key": "J", "label": "Inertia J [kg m2]",
+     "choices": [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0]},
+    {"key": "K_vf", "label": "V/f ratio [V/Hz]", "min": 3.0, "max": 10.0, "step": 0.5},
+    {"key": "V_boost", "label": "Voltage boost [V]", "min": 0.0, "max": 30.0, "step": 1.0},
+    {"key": "pwm_freq", "label": "PWM frequency [Hz]", "min": 500.0, "max": 4000.0, "step": 500.0},
+    {"key": "time_scale", "label": "Sim speed (1 = real time)",
+     "choices": [0.02, 0.05, 0.1, 0.2, 0.5, 1.0]},
+]
+settings_rects = {}          # key -> (minus_rect, plus_rect), Koordinaten der Werte-Flaeche
+settings_close_rect = None
+
+
+def change_setting(field, direction):
+    key = field["key"]
+    val = params[key]
+    if "choices" in field:
+        choices = field["choices"]
+        idx = min(range(len(choices)), key=lambda i: abs(choices[i] - val))
+        idx = max(0, min(len(choices) - 1, idx + direction))
+        val = choices[idx]
+    else:
+        val = round(val + direction * field["step"], 6)
+        val = max(field["min"], min(field["max"], val))
+    params[key] = val
+    apply_settings()
+
+
+def apply_settings():
+    sim.apply_params()
+    monitor.time_window = params["time_window_main"]
+    monitor_drive.time_window = params["time_window_drive"]
+
+
+def draw_settings_page(surface):
+    global settings_close_rect
+    surface.fill((40, 40, 50))
+    title_font = get_font(max(22, int(36 * SCALE)))
+    font = get_font(max(16, int(26 * SCALE)))
+    surface.blit(title_font.render("Settings", True, (255, 255, 255)), (scaled(20), scaled(10)))
+
+    y0 = scaled(60)
+    row_h = scaled(60)
+    bw, bh = scaled(40), scaled(40)
+    for idx, field in enumerate(setting_fields):
+        y = y0 + idx * row_h
+        val = params[field["key"]]
+        surface.blit(font.render(f"{field['label']}: {val:g}", True, (220, 220, 220)),
+                     (scaled(20), y + scaled(8)))
+        minus = pygame.Rect(surface.get_width() - scaled(110), y, bw, bh)
+        plus = pygame.Rect(surface.get_width() - scaled(60), y, bw, bh)
+        for r, txt in ((minus, "-"), (plus, "+")):
+            pygame.draw.rect(surface, (100, 100, 100), r)
+            lbl = font.render(txt, True, (255, 255, 255))
+            surface.blit(lbl, lbl.get_rect(center=r.center))
+        settings_rects[field["key"]] = (minus, plus)
+
+    settings_close_rect = pygame.Rect(scaled(20), y0 + len(setting_fields) * row_h + scaled(5),
+                                      scaled(260), scaled(46))
+    draw_button(surface, settings_close_rect, "Close", True)
+
+
+def handle_settings_click(pos):
+    """pos in Koordinaten der Werte-Flaeche. Gibt True zurueck, wenn behandelt."""
+    global show_settings
+    if settings_close_rect and settings_close_rect.collidepoint(pos):
+        show_settings = False
+        return True
+    for field in setting_fields:
+        rects = settings_rects.get(field["key"])
+        if not rects:
+            continue
+        if rects[0].collidepoint(pos):
+            change_setting(field, -1)
+            return True
+        if rects[1].collidepoint(pos):
+            change_setting(field, +1)
+            return True
+    return False
+
+
+# ------------------------------------------------------------------
+# Buttons
+# ------------------------------------------------------------------
+def draw_button(surface, rect, text, highlighted):
+    color = (150, 150, 90) if highlighted else (90, 90, 90)
     pygame.draw.rect(surface, color, rect)
-    pygame.draw.rect(surface, (0,0,0), rect, 2)
-    font = pygame.font.SysFont(None, max(18, int(24 * SCALE)))
-    label = font.render(text, True, (0,0,0))
+    pygame.draw.rect(surface, (255, 255, 0) if highlighted else (0, 0, 0), rect, 2)
+    label = get_font(max(16, int(26 * SCALE))).render(text, True, (0, 0, 0))
     surface.blit(label, label.get_rect(center=rect.center))
 
 
-# settings metadata for interactive editor
-setting_fields = [
-    {"key": "time_window_main", "label": "Main Time Window", "min": 0.5, "max": 15.0, "step": 0.5},
-    {"key": "time_window_drive", "label": "Drive Time Window", "min": 0.1, "max": 5.0, "step": 0.02},
-    {"key": "omega_target", "label": "Target Speed ω", "min": 0.5, "max": 50.0, "step": 0.5},
-    {"key": "k", "label": "Motor Constant k", "min": 0.0, "max": 5.0, "step": 0.01},
-    {"key": "J", "label": "Inertia J", "min": 0.01 , "max": 100.0, "step": 0.5},
-    {"key": "K_vf", "label": "V/f Gain", "min": 5, "max": 130.0, "step": 5},
-]
+button_margin = scaled(8)
+button_w = scaled(105)
+button_h = scaled(40)
+buttons = {}
+x = WIDTH - button_margin - button_w
+for name in ("Settings", "Reset", "Start", "Stop"):
+    buttons[name] = pygame.Rect(x, button_margin, button_w, button_h)
+    x -= button_margin + button_w
 
 
-def draw_settings_page(surface, settings_values):
-    surface.fill((40, 40, 50))
-    title_font = pygame.font.SysFont(None, max(28, int(36 * SCALE)))
-    font = pygame.font.SysFont(None, max(18, int(22 * SCALE)))
-    title = title_font.render("Settings", True, (255,255,255))
-    surface.blit(title, (scaled(20), scaled(10)))
-
-    y0 = scaled(60)
-    button_w = scaled(36)
-    for idx, field in enumerate(setting_fields):
-        y = y0 + idx * scaled(44)
-        key = field["key"]
-        val = settings_values.get(key, globals().get(key))
-        label = font.render(f"{field['label']}: {val:.6g}", True, (220,220,220))
-        surface.blit(label, (scaled(20), y))
-        minus = pygame.Rect(surface.get_width() - scaled(140), y, button_w, scaled(30))
-        plus = pygame.Rect(surface.get_width() - scaled(92), y, button_w, scaled(30))
-        pygame.draw.rect(surface, (100,100,100), minus)
-        pygame.draw.rect(surface, (100,100,100), plus)
-        surface.blit(font.render("-", True, (255,255,255)), minus.move(scaled(8), scaled(4)))
-        surface.blit(font.render("+", True, (255,255,255)), plus.move(scaled(8), scaled(4)))
-        field["minus_rect"] = minus
-        field["plus_rect"] = plus
-
-    close_rect = pygame.Rect(scaled(20), y0 + len(setting_fields) * scaled(44) + scaled(20), scaled(220), scaled(44))
-    draw_button(surface, close_rect, "Close Settings", active=True)
-    return close_rect
+def reset_simulation():
+    sim.reset()
+    monitor.clear()
+    monitor_drive.clear()
 
 
-sliders = [
-    # -------- LEFT COLUMN (Environment) --------
-    Slider(scaled(50),  scaled(50),  scaled(400), 0.0, 0.2, 0.05, "Noise Level", scale=SCALE),
-    Slider(scaled(50),  scaled(150), scaled(400), 0.005, 0.2, 0.1, "Load Disturbance", scale=SCALE),
-    Slider(scaled(50),  scaled(250), scaled(400), 0.1, 3.0, 0.5, "Disturbance Freq", scale=SCALE),
+# ------------------------------------------------------------------
+# Zeichnen
+# ------------------------------------------------------------------
+def draw_motor_view(surface):
+    surface.fill((30, 30, 30))
+    motor = sim.motor
+    iA, iB, iC = motor.phase_currents
+    currents = {"A": iA, "B": iB, "C": iC}
 
-    # -------- RIGHT COLUMN (PID) --------
-    Slider(scaled(550), scaled(50),  scaled(400), 0.0, 35.0, 5.0, "Kp", scale=SCALE),
-    Slider(scaled(550), scaled(150), scaled(400), 0.0, 10.0, 4.0, "Ki", scale=SCALE),
-    Slider(scaled(550), scaled(250), scaled(400), 0.0, 8.0, 0.2, "Kd", scale=SCALE),
-]
-#-----------------AC drive-------------------------
-drive = ACDrive()
+    pygame.draw.circle(surface, (150, 150, 150), sim_center, stator_radius, 2)
 
-counter=0 
-t=0
+    flux_level = motor.flux_amplitude / 1.0      # ca. 1 Vs = Nennfluss
+    sim.rotor.draw(surface, sim_center, rotor_radius, motor.flux_angle, flux_level, SCALE)
 
-fps=20
-torque_measured= rotor.torque 
-motor_torque= rotor.torque
-steps=int(1/dt /fps  ) 
-R_phase=1
+    for coil in coils:
+        coil.set_current(currents[coil.phase])
+        coil.draw(surface)
 
-iA = 0.0
-iB = 0.0
-iC = 0.0
-iA_s, iB_s, iC_s = iA, iB, iC
-vA_smooth, vB_smooth , vC_smooth = 0,0,0
+    # Staenderstrom-Raumzeiger
+    amp = min(1.0, motor.current_amplitude / (2 * I_SCALE))
+    if amp > 0.01:
+        ang = motor.current_angle
+        length = stator_radius * 0.95 * amp
+        end = (sim_center[0] + length * math.cos(ang), sim_center[1] - length * math.sin(ang))
+        pygame.draw.line(surface, (0, 255, 120), sim_center, end, max(2, int(5 * SCALE)))
+        pygame.draw.circle(surface, (0, 255, 120), (int(end[0]), int(end[1])), max(3, int(7 * SCALE)))
 
-substeps=2
-dt_fast = dt / substeps
+    font = get_font(max(14, int(24 * SCALE)))
+    legend = [
+        ("Space vectors, electrical angle (p = 2)", (220, 220, 220)),
+        ("green: stator current   N/S: rotor flux", (180, 230, 180)),
+        ("white dot: shaft (mech. angle)", (230, 230, 230)),
+        ("red/blue: current out of/into page", (220, 160, 160)),
+    ]
+    y = surface.get_height() - len(legend) * font.get_linesize() - scaled(8)
+    for text, color in legend:
+        surface.blit(font.render(text, True, color), (scaled(12), y))
+        y += font.get_linesize()
 
-# UI / simulation state
+
+def draw_values(surface, sim_tempo):
+    surface.fill((200, 200, 200))
+    motor, drive, rotor = sim.motor, sim.drive, sim.rotor
+    rpm = rotor.omega * 60 / (2 * math.pi)
+    texts = [
+        f"Status: {sim.status}",
+        f"Speed: {rotor.omega:6.1f} rad/s ({rpm:5.0f} rpm)",
+        f"Setpoint (ramp): {sim.omega_ref:6.1f} rad/s",
+        f"Motor torque: {sim.torque_filt:6.1f} Nm",
+        f"Load torque: {sim.load_torque:6.1f} Nm",
+        f"Stator frequency: {sim.freq:6.2f} Hz",
+        f"Slip: {100 * sim.slip:6.2f} %",
+        f"Phase voltage: {sim.V_amp:5.0f} V peak (m = {drive.modulation:.2f})",
+        f"U_DC: {drive.Vdc:5.0f} V",
+        f"Motor current: {motor.current_amplitude / math.sqrt(2):5.2f} A rms",
+        f"Rotor flux: {motor.flux_amplitude:5.3f} Vs",
+        f"Electrical power: {sim.power_filt:6.0f} W",
+        f"Sim speed: {sim_tempo:4.2f}x real time",
+    ]
+    font = get_font(max(16, int(28 * SCALE)))
+    line_h = font.get_linesize()
+    for i, text in enumerate(texts):
+        surface.blit(font.render(text, True, (0, 0, 0)), (scaled(16), scaled(10) + i * line_h))
+
+
+def draw_controls(surface):
+    surface.fill((180, 180, 180))
+    title_font = get_font(max(18, int(32 * SCALE)))
+    for x, title in zip(col_x, column_titles):
+        surface.blit(title_font.render(title, True, (20, 20, 60)), (x, scaled(10)))
+    for s in sliders.values():
+        s.draw(surface)
+
+
+# ------------------------------------------------------------------
+# Hauptschleife
+# ------------------------------------------------------------------
 sim_running = False
-show_settings = True
-settings_close_button = None
-
-# button geometry 
-button_margin = scaled(10)
-button_w = scaled(110)
-button_h = scaled(38)
-settings_button_rect = pygame.Rect(LEFT_WIDTH + RIGHT_WIDTH - button_margin - button_w, button_margin, button_w, button_h)
-start_button_rect = pygame.Rect(settings_button_rect.x - button_margin - button_w, button_margin, button_w, button_h)
-stop_button_rect = pygame.Rect(start_button_rect.x - button_margin - button_w, button_margin, button_w, button_h)
-
-
-
-
-while True:
-
-    if sim_running:
-
-
-
-        start=time.time()
-        sim_surface.fill((30,30,30))
-        clock.tick( fps - 10 * time_window_main )
-        noise_level = sliders[0].value
-        load_amp    = sliders[1].value
-        dist_freq   = sliders[2].value
-
-        Kp = sliders[3].value
-        Ki = sliders[4].value
-        Kd = sliders[5].value
-        pid_speed.Kp = Kp
-        pid_speed.Ki = Ki
-        pid_speed.Kd = Kd
-        # --- modulation (from controller) ---
-
-
-        #---------------------fast loop ::: dt ------------------------
-        for i in range(int(steps)):
-
-            # ----------fastest loop ::: dt_fast --------
-            for _ in range(substeps):
-
-
-                modulation = V_amp / max(0.5 * drive.Vdc, 1e-6)
-                modulation = min(modulation, 1.0)
-                modulation = max(modulation, 0.05)
-
-                # --- AC DRIVE ---
-                drive_out = drive.update(t, dt_fast, freq, modulation, iA, iB, iC)
-
-                vA = drive_out["vA"]
-                vB = drive_out["vB"]
-                vC = drive_out["vC"]
-
-                Vdc   = drive_out["Vdc"]
-                Vrect = drive_out["Vrect"]
-
-                vA_grid = drive_out["vA_grid"]
-                vB_grid = drive_out["vB_grid"]
-                vC_grid = drive_out["vC_grid"]
-
-                # --- CURRENT UPDATE ---
-                dIA = (vA - R_phase * iA) / max(L, 1e-6)
-                dIB = (vB - R_phase * iB) / max(L, 1e-6)
-                dIC = (vC - R_phase * iC) / max(L, 1e-6)
-
-                iA += dIA * dt_fast
-                iB += dIB * dt_fast
-                iC += dIC * dt_fast
-
-                t+=dt_fast 
-
-
-            #-------------filters -------------
-
-            vA_smooth += 0.005 * (vA - vA_smooth)
-            vB_smooth += 0.005 * (vB - vB_smooth)
-            vC_smooth += 0.005 * (vC - vC_smooth)
-
-            iA_s += 0.01 * (iA - iA_s)
-            iB_s += 0.01 * (iB - iB_s)
-            iC_s += 0.01 * (iC - iC_s)
-
-
-
-
-
-            psi_alpha, psi_beta = abc_to_alpha_beta(iA, iB, iC)
-            field_angle= np.arctan2(psi_beta, psi_alpha)
-            field_strength= np.sqrt(psi_alpha**2 + psi_beta**2)
-            pA = vA * iA
-            pB = vB * iB
-            pC = vC * iC
-            power_elec = pA + pB + pC
-            torque_max = k * field_strength
-            rotor.draw(sim_surface)
-            pygame.draw.circle(sim_surface, (150,150,150), center, stator_radius, 3)
-            for coil in coils:
-                coil.draw(sim_surface)
-
-
-
-
-            #------------------speed controller closed-loop  speed -> torque -------------------------- 
-
-            omega_measured=rotor.omega + random.uniform(-0.2, 0.2)
-            error_speed = omega_target - omega_measured
-            torque_ref=pid_speed.update(error_speed, dt)
-            #---------------torque controller closed loop   torque -> slip -------------------------
-
-            error_torque=torque_ref - torque_measured
-            slip_ref = pid_torque.update(error_torque, dt)
-            torque_measured= motor_torque 
-            #---------------- frequency from flux and speed from slip  -----------------------------------------------
-            omega_field = rotor.omega + slip_ref
-
-            # target frequency
-            freq_target = omega_field / (2 * np.pi)
-
-            # smooth it
-            freq += 0.05 * (freq_target - freq)
-
-            #-------------------- V/f controller ------------------------------------------------
-            V_target=K_vf * freq
-            V_amp += (V_target - V_amp) * 0.05
-            vf_ratio = V_amp / max(freq , 1e-6)
-        
-            #----------------------- Motor ------------------------------------------------------------
-
-            #Load torque 
-
-            if int(t) % 5 == 0:
-                step_dist = load_amp
-            else:
-                step_dist = 0
-
-            load_torque = step_dist + load_amp * np.sin(dist_freq * t)
-
-            noise = random.uniform(-noise_level, noise_level)
-
-            slip = omega_field - rotor.omega
-            motor_torque= k * field_strength * np.tanh(slip)
-            rotor.torque = motor_torque - load_torque + noise
-
-
-
-            #braking
-            brake_torque = brake.compute(rotor.omega)
-            rotor.torque-= brake_torque 
-    
-
-
-
-            rotor.update(dt)
-
-    
-            monitor.log(
-                    t,
-                    rotor.omega,
-                    rotor.torque,
-                    iA_s, iB_s, iC_s, 
-                    vA_smooth, vB_smooth, vC_smooth, 
-                    Vdc
-                )
-            monitor_drive.log(
-                t, 
-                iA, 
-                vA,  
-                Vdc, 
-                vA_grid, vB_grid, vC_grid, 
-                Vrect 
-            )
-
-
-
-
-        #-------------slow loop------------------------------
-        if counter % 10 == 0:
-            draw_values(
-                value_surface,
-                rotor,
-                field_strength
-            )
-        font = pygame.font.SysFont(None, 36)
-
-        control_surface.blit(font.render("Environment", True, (0,0,0)), (50, 10))
-        control_surface.blit(font.render("PID Control", True, (0,0,0)), (550, 10))
-
-
-
-        V_amp += (V_target - V_amp) * 0.05
-
-
-
-
-    if not sim_running:
-        clock.tick(10)
-
+show_settings = False
+sim_tempo = 0.0
+last_wall = time.perf_counter()
+last_sim_t = sim.t
+running = True
+
+while running:
+    # ---------------- Ereignisse ----------------
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
-            pygame.quit()
-            exit()
-        if event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_b:
-                brake.active=True
+            running = False
+
+        elif event.type == pygame.KEYDOWN:
             if event.key == pygame.K_ESCAPE:
-                pygame.quit()
-        if event.type == pygame.KEYUP:
+                running = False
+            elif event.key == pygame.K_b:
+                sim.brake.active = True
+            elif event.key == pygame.K_SPACE:
+                sim_running = not sim_running
+            elif event.key == pygame.K_r:
+                reset_simulation()
+            elif event.key == pygame.K_s:
+                show_settings = not show_settings
+
+        elif event.type == pygame.KEYUP:
             if event.key == pygame.K_b:
-                brake.active = False
+                sim.brake.active = False
 
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            pos = event.pos
+            if buttons["Start"].collidepoint(pos):
+                sim_running = True
+            elif buttons["Stop"].collidepoint(pos):
+                sim_running = False
+            elif buttons["Reset"].collidepoint(pos):
+                reset_simulation()
+            elif buttons["Settings"].collidepoint(pos):
+                show_settings = not show_settings
+            elif show_settings and rect_values.collidepoint(pos):
+                handle_settings_click((pos[0] - rect_values.x, pos[1] - rect_values.y))
 
-    # mouse interactions: buttons and settings page (robust coordinates)
-    if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-        px, py = event.pos
-        # check screen-space button rects
-        if settings_button_rect.collidepoint((px, py)):
-            print("DEBUG: settings button clicked")
-            show_settings = True
-        elif start_button_rect.collidepoint((px, py)):
-            print("DEBUG: start button clicked")
-            sim_running = True
-        elif stop_button_rect.collidepoint((px, py)):
-            print("DEBUG: stop button clicked")
-            sim_running = False
-        else:
-            # if settings page open, translate to value_surface coords
-            if show_settings:
-                rx = px - rect_values.x
-                ry = py - rect_values.y
-                if settings_close_button and settings_close_button.collidepoint((rx, ry)):
-                    show_settings = False
-                else:
-                    for field in setting_fields:
-                        if field.get("minus_rect") and field["minus_rect"].collidepoint((rx, ry)):
-                            key = field["key"]
-                            val = globals().get(key, 0)
-                            val = max(field["min"], min(field["max"], val - field["step"]))
-                            globals()[key] = val
-                            if key == "time_window_main":
-                                monitor.time_window = val
-                            if key == "time_window_drive":
-                                monitor_drive.time_window = val
-                            if key == "dt":
-                                dt = val
-                                steps = max(1, int(1 / max(dt, 1e-12) / fps))
-                                dt_fast = dt / max(substeps, 1)
-                            if key == "J":
-                                rotor.J = val
-                            if key == "omega_target":
-                                monitor.omega_target = val
-                                omega_target = val
-                        if field.get("plus_rect") and field["plus_rect"].collidepoint((rx, ry)):
-                            key = field["key"]
-                            val = globals().get(key, 0)
-                            val = max(field["min"], min(field["max"], val + field["step"]))
-                            globals()[key] = val
-                            if key == "time_window_main":
-                                monitor.time_window = val
-                            if key == "time_window_drive":
-                                monitor_drive.time_window = val
-                            if key == "dt":
-                                dt = val
-                                steps = max(1, int(1 / max(dt, 1e-12) / fps))
-                                dt_fast = dt / max(substeps, 1)
-                            if key == "J":
-                                rotor.J = val
-                            if key == "omega_target":
-                                monitor.omega_target = val
-                                omega_target = val
+        # Mausereignisse in Slider-Koordinaten weitergeben
+        if event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION):
+            local = (event.pos[0] - rect_controls.x, event.pos[1] - rect_controls.y)
+            attrs = {"pos": local}
+            if hasattr(event, "button"):
+                attrs["button"] = event.button
+            local_event = pygame.event.Event(event.type, attrs)
+            for s in sliders.values():
+                s.handle_event(local_event)
 
-    monitor.omega_target = globals().get('omega_target', monitor.omega_target)
-    omega_target = monitor.omega_target
+    if not running:
+        break
 
-    if event.type in [pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION]:
-        mx, my = event.pos
+    # ---------------- Simulation ----------------
+    sync_sliders()
+    if sim_running:
+        sim.advance(params["time_scale"] / FPS)
 
-        # shift into control area coordinates
-        mx -= rect_controls.x
-        my -= rect_controls.y
+    now = time.perf_counter()
+    wall_dt = now - last_wall
+    if wall_dt > 0:
+        tempo_now = (sim.t - last_sim_t) / wall_dt
+        sim_tempo += 0.1 * (tempo_now - sim_tempo)
+    last_wall, last_sim_t = now, sim.t
 
-        new_event = pygame.event.Event(event.type, pos=(mx, my))
-
-        for s in sliders:
-            s.handle_event(new_event)
-
+    # ---------------- Zeichnen ----------------
     monitor.draw_main_graphs(graph_surface_main)
     monitor_drive.draw_scope(graph_surface_drive)
+    draw_controls(control_surface)
+    draw_motor_view(sim_surface)
+    if show_settings:
+        draw_settings_page(value_surface)
+    else:
+        draw_values(value_surface, sim_tempo)
 
     screen.blit(graph_surface_main, rect_main)
     screen.blit(graph_surface_drive, rect_drive)
-
-
-
-    # ---------------- DRAW UI / SLIDERS ----------------
-    control_surface.fill((180, 180, 180))  # light background
-
-    for s in sliders:
-        s.draw(control_surface)
-
     screen.blit(control_surface, rect_controls)
-
-
-
-        
-
-    #V_amp = sliders[0].value
-    #freq  = sliders[1].value
-    omega_init =0
-    L = sliders[1].value
-
-
-
-    rotor.J = J
-
-    # only set omega once (important!)
-    if t < 0.1:
-        rotor.omega = omega_init
-
-
-
-
-    counter+=1
-
-
-
-
     screen.blit(sim_surface, rect_sim)
-    # draw control buttons on top of simulation (screen coords)
-    draw_button(screen, settings_button_rect, "settings", active=not show_settings)
-    pygame.draw.rect(screen, (255,255,0), settings_button_rect, 2)
-    draw_button(screen, start_button_rect, "Start", active=not sim_running)
-    pygame.draw.rect(screen, (255,255,0), start_button_rect, 2)
-    draw_button(screen, stop_button_rect, "Stop", active=sim_running)
-    pygame.draw.rect(screen, (255,255,0), stop_button_rect, 2)
-
-    # render settings page into the value panel when requested
-    if show_settings:
-        settings_values = {f["key"]: globals().get(f["key"]) for f in setting_fields}
-        settings_close_button = draw_settings_page(value_surface, settings_values)
-    else:
-        if counter % 10 == 0:
-            draw_values(value_surface, rotor, field_strength)
-
     screen.blit(value_surface, rect_values)
 
+    draw_button(screen, buttons["Start"], "Start", sim_running)
+    draw_button(screen, buttons["Stop"], "Stop", not sim_running)
+    draw_button(screen, buttons["Reset"], "Reset", False)
+    draw_button(screen, buttons["Settings"], "Settings", show_settings)
 
     pygame.display.flip()
+    clock.tick(FPS)
 
-
-
-
-    end=time.time()
-    #if counter%20==0:
-    #    print(end-start)
+pygame.quit()
+sys.exit()
